@@ -1,84 +1,116 @@
 <#
 .SYNOPSIS
-    Provisions a new Active Directory user account for a regional driver licensing office,
-    assigns them to the correct security groups based on role, and logs the action.
+    Gathers a rapid system health snapshot (OS details, uptime, pending reboots, 
+    memory utilization, and disk capacity) for initial ticket triage.
 
 .DESCRIPTION
-    Designed for onboarding staff during a phased system rollout (e.g. KINDL go-live) across
-    multiple regional offices. Takes a role name and maps it to the correct group memberships,
-    so access is consistent office-to-office instead of being configured ad hoc.
+    Designed as a first-response triage tool when a ticket reports slowness,
+    patching issues, or general instability. Can be run locally or against a 
+    remote machine over WinRM / CIM.
 
-.PARAMETER FirstName
-    New user's first name.
-
-.PARAMETER LastName
-    New user's last name.
-
-.PARAMETER OfficeCode
-    Short code identifying the regional office (e.g. "R12" for Region 12). Used to place the
-    account in the correct OU and to tag the access log.
-
-.PARAMETER Role
-    One of: "FrontDeskClerk", "OfficeSupervisor", "ITSupport", "RegionalAdmin".
-    Determines which security groups the account is added to.
+.PARAMETER ComputerName
+    Target machine name or IP address. Defaults to the local host.
 
 .EXAMPLE
-    .\New-UserAccount.ps1 -FirstName "Alex" -LastName "Rivera" -OfficeCode "R12" -Role "FrontDeskClerk"
+    .\Get-SystemHealthReport.ps1 -ComputerName "R12-DESK-014"
 #>
 
+[CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)][string]$FirstName,
-    [Parameter(Mandatory = $true)][string]$LastName,
-    [Parameter(Mandatory = $true)][string]$OfficeCode,
-    [Parameter(Mandatory = $true)]
-    [ValidateSet("FrontDeskClerk", "OfficeSupervisor", "ITSupport", "RegionalAdmin")]
-    [string]$Role
+    [Parameter(Position = 0, ValueFromPipeline = $true)]
+    [string]$ComputerName = $env:COMPUTERNAME
 )
 
-Import-Module ActiveDirectory
-
-# Role -> security group mapping. Keeping this in one place means every office
-# provisions accounts with identical, predictable access instead of one-off permissions.
-$roleGroupMap = @{
-    "FrontDeskClerk"   = @("KINDL-Users", "OfficePrinters")
-    "OfficeSupervisor" = @("KINDL-Users", "OfficePrinters", "KINDL-Supervisors")
-    "ITSupport"        = @("KINDL-Users", "KINDL-ITSupport", "HelpdeskTools")
-    "RegionalAdmin"    = @("KINDL-Users", "KINDL-Supervisors", "KINDL-RegionalAdmins")
+begin {
+    Write-Verbose "Querying system health metrics for target: $ComputerName"
 }
 
-$samAccountName = ("{0}.{1}" -f $FirstName, $LastName).ToLower()
-$userPrincipalName = "$samAccountName@ddl.ky.gov"
-$targetOU = "OU=$OfficeCode,OU=RegionalOffices,DC=ddl,DC=ky,DC=gov"
+process {
+    $isLocal = ($ComputerName -eq $env:COMPUTERNAME -or $ComputerName -eq 'localhost' -or $ComputerName -eq '127.0.0.1')
+    $session = $null
 
-try {
-    New-ADUser `
-        -Name "$FirstName $LastName" `
-        -GivenName $FirstName `
-        -Surname $LastName `
-        -SamAccountName $samAccountName `
-        -UserPrincipalName $userPrincipalName `
-        -Path $targetOU `
-        -Enabled $true `
-        -ChangePasswordAtLogon $true `
-        -AccountPassword (ConvertTo-SecureString "TempPass!2026" -AsPlainText -Force)
+    try {
+        if (-not $isLocal) {
+            # Quick connectivity check before initiating CIM session
+            if (-not (Test-Connection -ComputerName $ComputerName -Count 1 -Quiet)) {
+                throw "Host $ComputerName is offline or unreachable over ICMP."
+            }
+            $session = New-CimSession -ComputerName $ComputerName -ErrorAction Stop
+            $cimParams = @{ CimSession = $session }
+        } else {
+            $cimParams = @{}
+        }
 
-    foreach ($group in $roleGroupMap[$Role]) {
-        Add-ADGroupMember -Identity $group -Members $samAccountName
+        # Query OS and Memory information
+        $os = Get-CimInstance -ClassName Win32_OperatingSystem @cimParams -ErrorAction Stop
+        
+        # Calculate memory metrics
+        $totalMemGB = [math]::Round($os.TotalVisibleMemorySize / 1MB, 2)
+        $freeMemGB  = [math]::Round($os.FreePhysicalMemory / 1MB, 2)
+        $usedMemGB  = [math]::Round($totalMemGB - $freeMemGB, 2)
+        $memUsedPct = [math]::Round(($usedMemGB / $totalMemGB) * 100, 1)
+
+        # Query Fixed Disks
+        $disks = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType=3" @cimParams -ErrorAction Stop
+
+        # Check for pending reboot (remote-safe via CIM/Registry query)
+        $rebootPending = $false
+        $regCheckBlock = {
+            $wu = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired"
+            $cbs = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
+            (Test-Path $wu) -or (Test-Path $cbs)
+        }
+
+        if ($isLocal) {
+            $rebootPending = & $regCheckBlock
+        } else {
+            $rebootPending = Invoke-Command -CimSession $session -ScriptBlock $regCheckBlock -ErrorAction SilentlyContinue
+            if ($null -eq $rebootPending) { $rebootPending = $false }
+        }
+
+        # Output Summary
+        Write-Host "`n========================================================" -ForegroundColor Cyan
+        Write-Host " SYSTEM HEALTH REPORT: $($ComputerName.ToUpper())" -ForegroundColor Cyan
+        Write-Host "========================================================" -ForegroundColor Cyan
+        
+        Write-Host "OS Version      : $($os.Caption) (Build $($os.BuildNumber))"
+        Write-Host "Last Boot Time  : $($os.LastBootUpTime)"
+        
+        if ($rebootPending) {
+            Write-Host "Pending Reboot  : " -NoNewline
+            Write-Host "YES (Reboot Required)" -ForegroundColor Yellow
+        } else {
+            Write-Host "Pending Reboot  : No"
+        }
+
+        Write-Host "Memory Usage    : $usedMemGB GB / $totalMemGB GB ($memUsedPct% in use)"
+
+        Write-Host "`nDisk Storage:"
+        foreach ($d in $disks) {
+            if ($d.Size -gt 0) {
+                $totalDiskGB = [math]::Round($d.Size / 1GB, 1)
+                $freeDiskGB  = [math]::Round($d.FreeSpace / 1GB, 1)
+                $freePct     = [math]::Round(($d.FreeSpace / $d.Size) * 100, 1)
+
+                $diskLine = "  [{0}] {1} GB free of {2} GB ({3}% free)" -f $d.DeviceID, $freeDiskGB, $totalDiskGB, $freePct
+
+                if ($freePct -lt 10) {
+                    Write-Host "$diskLine <-- CRITICAL: LOW DISK SPACE" -ForegroundColor Red
+                } elseif ($freePct -lt 15) {
+                    Write-Host "$diskLine <-- WARNING: Low Space" -ForegroundColor Yellow
+                } else {
+                    Write-Host $diskLine
+                }
+            }
+        }
+        Write-Host ""
     }
-
-    # Log every provisioning action for the access-review audit trail (see access-management/).
-    $logEntry = [PSCustomObject]@{
-        Timestamp   = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-        Action      = "ProvisionAccount"
-        User        = $samAccountName
-        Office      = $OfficeCode
-        Role        = $Role
-        GroupsAdded = ($roleGroupMap[$Role] -join "; ")
+    catch {
+        Write-Error "Failed to retrieve health metrics from $ComputerName. Details: $($_.Exception.Message)"
     }
-    $logEntry | Export-Csv -Path "..\access-management\access-request-log.csv" -Append -NoTypeInformation
-
-    Write-Host "Provisioned account '$samAccountName' for $Role at office $OfficeCode." -ForegroundColor Green
-}
-catch {
-    Write-Error "Failed to provision account for $FirstName $LastName : $_"
+    finally {
+        if ($session) {
+            Remove-CimSession $session -ErrorAction SilentlyContinue
+        }
+    }
 }
