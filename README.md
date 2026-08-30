@@ -1,4 +1,4 @@
-# KINDL Regional IT Support Toolkit
+# Regional IT Support Toolkit
 
 A practical toolkit simulating the IT support and Active Directory administration needed during a statewide enterprise rollout (modeled after KYTC's KINDL transition across regional driver licensing offices).
 
