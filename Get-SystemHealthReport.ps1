@@ -1,46 +1,116 @@
 <#
 .SYNOPSIS
-    Pulls a quick health snapshot of a workstation — disk space, memory, pending reboots,
-    and Windows Update status — for fast triage on a support ticket.
+    Gathers a rapid system health snapshot (OS details, uptime, pending reboots, 
+    memory utilization, and disk capacity) for initial ticket triage.
 
 .DESCRIPTION
-    Meant to be the first thing run against a machine when a ticket comes in ("system is
-    slow", "can't install update", etc.) so the tech has a baseline before digging further.
-    Can be run locally or against a remote computer with -ComputerName.
+    Designed as a first-response triage tool when a ticket reports slowness,
+    patching issues, or general instability. Can be run locally or against a 
+    remote machine over WinRM / CIM.
 
 .PARAMETER ComputerName
-    Target machine. Defaults to the local machine.
+    Target machine name or IP address. Defaults to the local host.
 
 .EXAMPLE
     .\Get-SystemHealthReport.ps1 -ComputerName "R12-DESK-014"
 #>
 
+[CmdletBinding()]
 param(
+    [Parameter(Position = 0, ValueFromPipeline = $true)]
     [string]$ComputerName = $env:COMPUTERNAME
 )
 
-$session = if ($ComputerName -eq $env:COMPUTERNAME) { $null } else { New-CimSession -ComputerName $ComputerName }
-$cimParams = if ($session) { @{ CimSession = $session } } else { @{} }
-
-$os = Get-CimInstance -ClassName Win32_OperatingSystem @cimParams
-$disk = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType=3" @cimParams
-$rebootPending = Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired" -ErrorAction SilentlyContinue
-
-Write-Host "=== System Health Report: $ComputerName ===" -ForegroundColor Cyan
-Write-Host "OS: $($os.Caption) (Build $($os.BuildNumber))"
-Write-Host "Last Boot: $($os.LastBootUpTime)"
-Write-Host "Reboot Pending: $rebootPending"
-Write-Host ""
-
-Write-Host "Free Memory: $([math]::Round($os.FreePhysicalMemory / 1MB, 2)) GB of $([math]::Round($os.TotalVisibleMemorySize / 1MB, 2)) GB"
-Write-Host ""
-
-Write-Host "Disk Space:"
-$disk | ForEach-Object {
-    $freePct = [math]::Round(($_.FreeSpace / $_.Size) * 100, 1)
-    $flag = if ($freePct -lt 10) { " <-- LOW SPACE" } else { "" }
-    Write-Host ("  {0}: {1} GB free of {2} GB ({3}% free){4}" -f `
-        $_.DeviceID, [math]::Round($_.FreeSpace / 1GB, 1), [math]::Round($_.Size / 1GB, 1), $freePct, $flag)
+begin {
+    Write-Verbose "Querying system health metrics for target: $ComputerName"
 }
 
-if ($session) { Remove-CimSession $session }
+process {
+    $isLocal = ($ComputerName -eq $env:COMPUTERNAME -or $ComputerName -eq 'localhost' -or $ComputerName -eq '127.0.0.1')
+    $session = $null
+
+    try {
+        if (-not $isLocal) {
+            # Quick connectivity check before initiating CIM session
+            if (-not (Test-Connection -ComputerName $ComputerName -Count 1 -Quiet)) {
+                throw "Host $ComputerName is offline or unreachable over ICMP."
+            }
+            $session = New-CimSession -ComputerName $ComputerName -ErrorAction Stop
+            $cimParams = @{ CimSession = $session }
+        } else {
+            $cimParams = @{}
+        }
+
+        # Query OS and Memory information
+        $os = Get-CimInstance -ClassName Win32_OperatingSystem @cimParams -ErrorAction Stop
+        
+        # Calculate memory metrics
+        $totalMemGB = [math]::Round($os.TotalVisibleMemorySize / 1MB, 2)
+        $freeMemGB  = [math]::Round($os.FreePhysicalMemory / 1MB, 2)
+        $usedMemGB  = [math]::Round($totalMemGB - $freeMemGB, 2)
+        $memUsedPct = [math]::Round(($usedMemGB / $totalMemGB) * 100, 1)
+
+        # Query Fixed Disks
+        $disks = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType=3" @cimParams -ErrorAction Stop
+
+        # Check for pending reboot (remote-safe via CIM/Registry query)
+        $rebootPending = $false
+        $regCheckBlock = {
+            $wu = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired"
+            $cbs = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
+            (Test-Path $wu) -or (Test-Path $cbs)
+        }
+
+        if ($isLocal) {
+            $rebootPending = & $regCheckBlock
+        } else {
+            $rebootPending = Invoke-Command -CimSession $session -ScriptBlock $regCheckBlock -ErrorAction SilentlyContinue
+            if ($null -eq $rebootPending) { $rebootPending = $false }
+        }
+
+        # Output Summary
+        Write-Host "`n========================================================" -ForegroundColor Cyan
+        Write-Host " SYSTEM HEALTH REPORT: $($ComputerName.ToUpper())" -ForegroundColor Cyan
+        Write-Host "========================================================" -ForegroundColor Cyan
+        
+        Write-Host "OS Version      : $($os.Caption) (Build $($os.BuildNumber))"
+        Write-Host "Last Boot Time  : $($os.LastBootUpTime)"
+        
+        if ($rebootPending) {
+            Write-Host "Pending Reboot  : " -NoNewline
+            Write-Host "YES (Reboot Required)" -ForegroundColor Yellow
+        } else {
+            Write-Host "Pending Reboot  : No"
+        }
+
+        Write-Host "Memory Usage    : $usedMemGB GB / $totalMemGB GB ($memUsedPct% in use)"
+
+        Write-Host "`nDisk Storage:"
+        foreach ($d in $disks) {
+            if ($d.Size -gt 0) {
+                $totalDiskGB = [math]::Round($d.Size / 1GB, 1)
+                $freeDiskGB  = [math]::Round($d.FreeSpace / 1GB, 1)
+                $freePct     = [math]::Round(($d.FreeSpace / $d.Size) * 100, 1)
+
+                $diskLine = "  [{0}] {1} GB free of {2} GB ({3}% free)" -f $d.DeviceID, $freeDiskGB, $totalDiskGB, $freePct
+
+                if ($freePct -lt 10) {
+                    Write-Host "$diskLine <-- CRITICAL: LOW DISK SPACE" -ForegroundColor Red
+                } elseif ($freePct -lt 15) {
+                    Write-Host "$diskLine <-- WARNING: Low Space" -ForegroundColor Yellow
+                } else {
+                    Write-Host $diskLine
+                }
+            }
+        }
+        Write-Host ""
+    }
+    catch {
+        Write-Error "Failed to retrieve health metrics from $ComputerName. Details: $($_.Exception.Message)"
+    }
+    finally {
+        if ($session) {
+            Remove-CimSession $session -ErrorAction SilentlyContinue
+        }
+    }
+}
