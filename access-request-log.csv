@@ -1,0 +1,3 @@
+Timestamp,Action,User,Office,Role,Reason,GroupsAdded,GroupsRemoved
+2026-06-01 09:12:03,ProvisionAccount,alex.rivera,R12,FrontDeskClerk,,"KINDL-Users; OfficePrinters",
+2026-08-14 14:47:21,DeprovisionAccount,jordan.k,R12,,Transfer,,"KINDL-Users; OfficePrinters; KINDL-Supervisors"
