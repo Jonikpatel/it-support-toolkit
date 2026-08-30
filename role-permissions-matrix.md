@@ -1,25 +1,25 @@
 # Role-Based Permissions Matrix
 
-Defines standardized access levels for regional office personnel during the KINDL rollout. Accounts are provisioned strictly against this matrix (via `scripts/New-UserAccount.ps1`) to ensure consistent security baselines across branch locations and eliminate ad-hoc privilege creep.
+Defines standardized access levels for regional branch personnel during enterprise rollouts. User accounts are provisioned strictly against this matrix (via `scripts/New-UserAccount.ps1`) to ensure consistent security baselines across branch locations and eliminate ad-hoc privilege creep.
 
 ---
 
 ## Access Matrix
 
-| Role | KINDL Access | View Records | Edit Records | Admin Console | Assigned Security Groups |
+| Role | Enterprise Portal Access | View Records | Edit Records | Admin Console | Assigned Security Groups |
 | :--- | :--- | :---: | :---: | :---: | :--- |
-| **Front Desk Clerk** | Read / Write (own branch transactions) | Yes | Own transactions only | No | `KINDL-Users`, `OfficePrinters` |
-| **Office Supervisor** | Read / Write (branch-wide) | Yes | Branch-wide | No | `KINDL-Users`, `OfficePrinters`, `KINDL-Supervisors` |
-| **IT Support** | Tools / diagnostics only | No | No | Helpdesk utilities only | `KINDL-Users`, `KINDL-ITSupport`, `HelpdeskTools` |
-| **Regional Admin** | Full Read / Write (region-wide) | Yes | Region-wide | Yes | `KINDL-Users`, `KINDL-Supervisors`, `KINDL-RegionalAdmins` |
+| **Front Desk Clerk** | Read / Write (own branch transactions) | Yes | Own transactions only | No | `EnterpriseApp-StandardUsers`, `Branch-Printers` |
+| **Office Supervisor** | Read / Write (branch-wide) | Yes | Branch-wide | No | `EnterpriseApp-StandardUsers`, `Branch-Printers`, `EnterpriseApp-BranchSupervisors` |
+| **IT Support** | Tools / diagnostics only | No | No | Helpdesk utilities only | `EnterpriseApp-StandardUsers`, `IT-Tier2-Diagnostics`, `HelpdeskTools` |
+| **Regional Admin** | Full Read / Write (region-wide) | Yes | Region-wide | Yes | `EnterpriseApp-StandardUsers`, `EnterpriseApp-BranchSupervisors`, `EnterpriseApp-RegionalAdmins` |
 
 ---
 
 ## Core Security Principles
 
-* **Least Privilege by Default:** IT Support accounts do not have access to driver or citizen record data. If a specific troubleshooting ticket requires elevated or temporary record access, it must be formally requested, approved, and logged as an exception.
-* **No Standing Admin Privileges:** Access to the KINDL admin console is restricted to the Regional Admin role. Broader domain administrative tasks require standard privileged access management (PAM) procedures.
-* **Role-Bound Permissions:** Access follows the job function, not the individual. When staff members transfer branches or change roles, their account is deprovisioned and re-provisioned against the target role rather than layering new groups over legacy permissions.
+* **Least Privilege by Default:** IT Support accounts do not have access to customer, client, or transactional record data. If a specific troubleshooting ticket requires elevated or temporary record access, it must be formally requested, approved, and logged as a time-limited exception.
+* **No Standing Admin Privileges:** Access to the enterprise admin console is strictly restricted to the Regional Admin role. Broader domain administrative tasks require standard privileged access management (PAM) procedures.
+* **Role-Bound Permissions:** Access follows the job function, not the individual. When staff members transfer branches or change operational roles, their account is deprovisioned and re-provisioned against the target role rather than layering new groups over legacy permissions.
 
 ---
 
